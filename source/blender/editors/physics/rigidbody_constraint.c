@@ -33,21 +33,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "MEM_guardedalloc.h"
-
-#include "DNA_group_types.h"
+#include "DNA_fracture_types.h"
 #include "DNA_object_types.h"
 #include "DNA_rigidbody_types.h"
 #include "DNA_scene_types.h"
 
-#include "BLI_blenlib.h"
 #include "BLI_math.h"
+#include "BLI_listbase.h"
 
 #include "BKE_context.h"
+#include "BKE_fracture.h"
 #include "BKE_depsgraph.h"
 #include "BKE_global.h"
 #include "BKE_group.h"
-#include "BKE_object.h"
 #include "BKE_report.h"
 #include "BKE_rigidbody.h"
 
@@ -91,8 +89,16 @@ bool ED_rigidbody_constraint_add(Scene *scene, Object *ob, int type, ReportList 
 		rbw->constraints = BKE_group_add(G.main, "RigidBodyConstraints");
 	}
 	/* make rigidbody constraint settings */
-	ob->rigidbody_constraint = BKE_rigidbody_create_constraint(scene, ob, type);
-	ob->rigidbody_constraint->flag |= RBC_FLAG_NEEDS_VALIDATE;
+
+	ob->rigidbody_constraint = BKE_rigidbody_create_constraint(ob, type);
+	if (ob->rigidbody_object) {
+		/* set ourself as both partners by default, if we are on a rigidbody object */
+		/* mostly we want inner constraints, this is the default for that */
+		ob->rigidbody_constraint->ob1 = ob;
+		ob->rigidbody_constraint->ob2 = ob;
+	}
+
+	rbw->flag |= RBW_FLAG_OBJECT_CHANGED;
 
 	/* add constraint to rigid body constraint group */
 	BKE_group_object_add(rbw->constraints, ob, scene, NULL);
@@ -105,7 +111,7 @@ void ED_rigidbody_constraint_remove(Scene *scene, Object *ob)
 {
 	RigidBodyWorld *rbw = BKE_rigidbody_get_world(scene);
 
-	BKE_rigidbody_remove_constraint(scene, ob);
+	BKE_rigidbody_free_constraint(ob);
 	if (rbw)
 		BKE_group_object_unlink(rbw->constraints, ob, scene, NULL);
 
@@ -200,6 +206,51 @@ void RIGIDBODY_OT_constraint_remove(wmOperatorType *ot)
 	/* callbacks */
 	ot->exec = rigidbody_con_remove_exec;
 	ot->poll = ED_operator_rigidbody_con_active_poll;
+
+	/* flags */
+	ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;
+}
+
+/* ************ Remove Rigid Body Constraints ************** */
+
+static int rigidbody_constraints_remove_exec(bContext *C, wmOperator *UNUSED(op))
+{
+	Scene *scene = CTX_data_scene(C);
+	bool change = false;
+
+	/* apply this to all selected objects... */
+	CTX_DATA_BEGIN(C, Object *, ob, selected_objects)
+	{
+		if (ob->rigidbody_constraint) {
+			ED_rigidbody_constraint_remove(scene, ob);
+			change = true;
+		}
+	}
+	CTX_DATA_END;
+
+	if (change) {
+		/* send updates */
+		WM_event_add_notifier(C, NC_OBJECT | ND_TRANSFORM, NULL);
+		WM_event_add_notifier(C, NC_OBJECT | ND_POINTCACHE, NULL);
+
+		/* done */
+		return OPERATOR_FINISHED;
+	}
+	else {
+		return OPERATOR_CANCELLED;
+	}
+}
+
+void RIGIDBODY_OT_constraints_remove(wmOperatorType *ot)
+{
+	/* identifiers */
+	ot->idname = "RIGIDBODY_OT_constraints_remove";
+	ot->name = "Remove Rigid Body Constraints";
+	ot->description = "Remove selected constraints from Rigid Body simulation";
+
+	/* callbacks */
+	ot->exec = rigidbody_constraints_remove_exec;
+	ot->poll = ED_operator_scene_editable;
 
 	/* flags */
 	ot->flag = OPTYPE_REGISTER | OPTYPE_UNDO;

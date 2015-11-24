@@ -21,7 +21,7 @@ import bpy
 from bpy.types import Panel
 
 
-class PHYSICS_PT_rigidbody_panel():
+class PHYSICS_PT_rigidbody_panel:
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
     bl_context = "physics"
@@ -33,14 +33,14 @@ class PHYSICS_PT_rigid_body(PHYSICS_PT_rigidbody_panel, Panel):
     @classmethod
     def poll(cls, context):
         obj = context.object
-        return (obj and obj.rigid_body and
+        return (obj and obj.rigidbody_object and
                 (not context.scene.render.use_game_engine))
 
     def draw(self, context):
         layout = self.layout
 
         ob = context.object
-        rbo = ob.rigid_body
+        rbo = ob.rigidbody_object
 
         if rbo is not None:
             layout.prop(rbo, "type", text="Type")
@@ -48,6 +48,12 @@ class PHYSICS_PT_rigid_body(PHYSICS_PT_rigidbody_panel, Panel):
             if rbo.type == 'ACTIVE':
                 row.prop(rbo, "enabled", text="Dynamic")
             row.prop(rbo, "kinematic", text="Animated")
+            if rbo.type == 'ACTIVE':
+                row = layout.row()
+                row.prop(rbo, "use_kinematic_deactivation", text="Triggered")
+                row.prop(rbo, "is_trigger")
+                row = layout.row()
+                row.prop(rbo, "is_ghost")
 
             if rbo.type == 'ACTIVE':
                 layout.prop(rbo, "mass")
@@ -59,14 +65,14 @@ class PHYSICS_PT_rigid_body_collisions(PHYSICS_PT_rigidbody_panel, Panel):
     @classmethod
     def poll(cls, context):
         obj = context.object
-        return (obj and obj.rigid_body and
+        return (obj and obj.rigidbody_object and
                 (not context.scene.render.use_game_engine))
 
     def draw(self, context):
         layout = self.layout
 
         ob = context.object
-        rbo = ob.rigid_body
+        rbo = ob.rigidbody_object
 
         layout.prop(rbo, "collision_shape", text="Shape")
 
@@ -103,15 +109,15 @@ class PHYSICS_PT_rigid_body_dynamics(PHYSICS_PT_rigidbody_panel, Panel):
     @classmethod
     def poll(cls, context):
         obj = context.object
-        return (obj and obj.rigid_body and
-                obj.rigid_body.type == 'ACTIVE' and
+        return (obj and obj.rigidbody_object and
+                obj.rigidbody_object.type == 'ACTIVE' and
                 (not context.scene.render.use_game_engine))
 
     def draw(self, context):
         layout = self.layout
 
         ob = context.object
-        rbo = ob.rigid_body
+        rbo = ob.rigidbody_object
 
         #col = layout.column(align=1)
         #col.label(text="Activation:")

@@ -20,7 +20,7 @@
  *
  * The Original Code is: all of this file.
  *
- * Contributor(s): Joshua Leung, Sergej Reich
+ * Contributor(s): Joshua Leung, Sergej Reich, Martin Felke
  *
  * ***** END GPL LICENSE BLOCK *****
  */
@@ -72,6 +72,154 @@ subject to the following restrictions:
 #include "BulletCollision/Gimpact/btGImpactShape.h"
 #include "BulletCollision/Gimpact/btGImpactCollisionAlgorithm.h"
 #include "BulletCollision/CollisionShapes/btScaledBvhTriangleMeshShape.h"
+#include "BulletCollision/CollisionDispatch/btCollisionWorld.h"
+
+typedef bool (*rbKinematicCallback)(void *user_pointer);
+
+class MyRigidBody : public btRigidBody
+{
+	public:
+		MyRigidBody(btRigidBodyConstructionInfo &info, rbKinematicCallback callback, void *user_ptr);
+		rbKinematicCallback m_kinematicCallback;
+		void *m_userPointer;
+		bool isKinematicObject();
+};
+
+MyRigidBody::MyRigidBody(btRigidBody::btRigidBodyConstructionInfo& info,
+                         rbKinematicCallback callback, void *user_ptr) : btRigidBody(info)
+{
+	m_kinematicCallback = callback;
+	m_userPointer = user_ptr;
+}
+
+bool MyRigidBody::isKinematicObject()
+{
+	if (m_kinematicCallback) {
+		if (m_kinematicCallback(m_userPointer)) {
+			return true;
+		}
+		else {
+			return btRigidBody::isKinematicObject();
+		}
+	}
+	return btRigidBody::isKinematicObject();
+}
+
+
+struct rbRigidBody {
+	MyRigidBody *body;
+	int col_groups;
+	int linear_index;
+	void *meshIsland;
+	void *blenderOb;
+	rbDynamicsWorld *world;
+};
+
+static inline void copy_v3_btvec3(float vec[3], const btVector3 &btvec)
+{
+	vec[0] = (float)btvec[0];
+	vec[1] = (float)btvec[1];
+	vec[2] = (float)btvec[2];
+}
+
+typedef void (*rbContactCallback)(rbContactPoint * cp, void *bworld);
+
+class TickDiscreteDynamicsWorld : public btDiscreteDynamicsWorld
+{
+	public:
+		TickDiscreteDynamicsWorld(btDispatcher* dispatcher,btBroadphaseInterface* pairCache,
+		                          btConstraintSolver* constraintSolver,btCollisionConfiguration* collisionConfiguration,
+		                          rbContactCallback cont_callback, void *bworld);
+		rbContactPoint* make_contact_point(btManifoldPoint& point, const btCollisionObject *body0, const btCollisionObject *body1);
+		rbContactCallback m_contactCallback;
+		virtual void saveKinematicState(btScalar timeStep);
+		void* m_bworld;
+};
+
+static void tickCallback(btDynamicsWorld *world, btScalar timeStep)
+{
+	int numManifolds = world->getDispatcher()->getNumManifolds();
+	for (int i=0;i<numManifolds;i++)
+	{
+		btPersistentManifold* contactManifold =  world->getDispatcher()->getManifoldByIndexInternal(i);
+		const btCollisionObject* obA = contactManifold->getBody0();
+		const btCollisionObject* obB = contactManifold->getBody1();
+
+		int numContacts = contactManifold->getNumContacts();
+		for (int j=0;j<numContacts;j++)
+		{
+			btManifoldPoint& pt = contactManifold->getContactPoint(j);
+			if (pt.getDistance()<0.f)
+			{
+				/*const btVector3& ptA = pt.getPositionWorldOnA();
+				const btVector3& ptB = pt.getPositionWorldOnB();
+				const btVector3& normalOnB = pt.m_normalWorldOnB;*/
+
+				TickDiscreteDynamicsWorld* tworld = (TickDiscreteDynamicsWorld*)world;
+				if (tworld->m_contactCallback)
+				{
+					rbContactPoint* cp = tworld->make_contact_point(pt, obA, obB);
+					tworld->m_contactCallback(cp, tworld->m_bworld);
+					delete cp;
+				}
+			}
+		}
+	}
+}
+
+TickDiscreteDynamicsWorld::TickDiscreteDynamicsWorld(btDispatcher* dispatcher,btBroadphaseInterface* pairCache,
+                                                     btConstraintSolver* constraintSolver,btCollisionConfiguration* collisionConfiguration,
+                                                     rbContactCallback cont_callback, void *bworld) :
+                                                     btDiscreteDynamicsWorld(dispatcher, pairCache, constraintSolver, collisionConfiguration)
+{
+	m_internalTickCallback = tickCallback;
+	m_contactCallback = cont_callback;
+	m_bworld = bworld;
+}
+
+//need a virtual method to override
+void	TickDiscreteDynamicsWorld::saveKinematicState(btScalar timeStep)
+{
+///would like to iterate over m_nonStaticRigidBodies, but unfortunately old API allows
+///to switch status _after_ adding kinematic objects to the world
+///fix it for Bullet 3.x release
+	for (int i=0;i<m_collisionObjects.size();i++)
+	{
+		btCollisionObject* colObj = m_collisionObjects[i];
+		MyRigidBody* body = (MyRigidBody*)colObj;
+		if (body && body->getActivationState() != ISLAND_SLEEPING)
+		{
+			if (body->isKinematicObject())
+			{
+				//to calculate velocities next frame
+				body->saveKinematicState(timeStep);
+			}
+		}
+	}
+}
+
+rbContactPoint* TickDiscreteDynamicsWorld::make_contact_point(btManifoldPoint& point, const btCollisionObject* body0, const btCollisionObject* body1)
+{
+	rbContactPoint *cp = new rbContactPoint;
+	btRigidBody* bodyA = (btRigidBody*)(body0);
+	btRigidBody* bodyB = (btRigidBody*)(body1);
+	rbRigidBody* rbA = (rbRigidBody*)(bodyA->getUserPointer());
+	rbRigidBody* rbB = (rbRigidBody*)(bodyB->getUserPointer());
+	if (rbA) {
+		cp->contact_body_indexA = rbA->linear_index;
+		cp->contact_obA = rbA->blenderOb;
+	}
+
+	if (rbB) {
+		cp->contact_body_indexB = rbB->linear_index;
+		cp->contact_obB = rbB->blenderOb;
+	}
+	cp->contact_force = point.getAppliedImpulse();
+	copy_v3_btvec3(cp->contact_pos_world_onA, point.getPositionWorldOnA());
+	copy_v3_btvec3(cp->contact_pos_world_onB, point.getPositionWorldOnB());
+
+	return cp;
+}
 
 struct rbDynamicsWorld {
 	btDiscreteDynamicsWorld *dynamicsWorld;
@@ -80,10 +228,8 @@ struct rbDynamicsWorld {
 	btBroadphaseInterface *pairCache;
 	btConstraintSolver *constraintSolver;
 	btOverlapFilterCallback *filterCallback;
-};
-struct rbRigidBody {
-	btRigidBody *body;
-	int col_groups;
+	void *blenderWorld;
+	//struct rbContactCallback *contactCallback;
 };
 
 struct rbVert {
@@ -106,28 +252,115 @@ struct rbCollisionShape {
 	rbMeshData *mesh;
 };
 
+struct myResultCallback : public btCollisionWorld::ClosestRayResultCallback
+{
+	public:
+
+	bool needsCollision(btBroadphaseProxy *proxy0) const
+	{
+		return true;
+	}
+
+	myResultCallback(const btVector3 &v1, const btVector3 &v2)
+	    : btCollisionWorld::ClosestRayResultCallback(v1, v2)
+	{
+	}
+};
+
 struct rbFilterCallback : public btOverlapFilterCallback
 {
+	int (*callback)(void* world, void* island1, void* island2, void* blenderOb1, void* blenderOb2);
+
+	rbFilterCallback(int (*callback)(void* world, void* island1, void* island2, void* blenderOb1, void* blenderOb2)) {
+		this->callback = callback;
+	}
+
 	virtual bool needBroadphaseCollision(btBroadphaseProxy *proxy0, btBroadphaseProxy *proxy1) const
 	{
 		rbRigidBody *rb0 = (rbRigidBody *)((btRigidBody *)proxy0->m_clientObject)->getUserPointer();
 		rbRigidBody *rb1 = (rbRigidBody *)((btRigidBody *)proxy1->m_clientObject)->getUserPointer();
-		
+
 		bool collides;
 		collides = (proxy0->m_collisionFilterGroup & proxy1->m_collisionFilterMask) != 0;
 		collides = collides && (proxy1->m_collisionFilterGroup & proxy0->m_collisionFilterMask);
 		collides = collides && (rb0->col_groups & rb1->col_groups);
+		if (this->callback != NULL) {
+			int result = 0;
+			//cast ray from centroid of 1 rigidbody to another, do this only for mesh shapes (all other can use standard bbox)
+			int stype0 = rb0->body->getCollisionShape()->getShapeType();
+			int stype1 = rb1->body->getCollisionShape()->getShapeType();
+			bool nonMeshShape0 = (stype0 != GIMPACT_SHAPE_PROXYTYPE) && (stype0 != TRIANGLE_MESH_SHAPE_PROXYTYPE);
+			bool nonMeshShape1 = (stype1 != GIMPACT_SHAPE_PROXYTYPE) && (stype1 != TRIANGLE_MESH_SHAPE_PROXYTYPE);
+
+			if ((rb0->meshIsland != NULL) ^ (rb1->meshIsland != NULL))
+			{
+				btVector3 v0, v1;
+				rbRigidBody* rb2 = NULL;
+				bool valid = false;
+
+				if (rb0->meshIsland != NULL)
+				{
+					v0 = rb0->body->getWorldTransform().getOrigin();
+					v1 = rb1->body->getWorldTransform().getOrigin();
+				}
+				else if (rb1->meshIsland != NULL)
+				{
+					v0 = rb1->body->getWorldTransform().getOrigin();
+					v1 = rb0->body->getWorldTransform().getOrigin();
+				}
+
+				myResultCallback cb(v0, v1);
+				rb0->world->dynamicsWorld->rayTest(v0, v1, cb);
+				if (cb.m_collisionObject != NULL)
+				{
+					rb2 = (rbRigidBody*)cb.m_collisionObject->getUserPointer();
+				}
+				else
+				{
+					valid = false;
+				}
+
+				if (rb0->meshIsland != NULL && rb2 != NULL)
+				{
+					valid = rb2->blenderOb != rb0->blenderOb;
+				}
+				else if (rb1->meshIsland != NULL && rb2 != NULL)
+				{
+					valid = rb2->blenderOb != rb1->blenderOb;
+				}
+
+				if (rb0->meshIsland != NULL)
+				{
+					valid = valid || nonMeshShape1;
+				}
+				else if (rb1->meshIsland != NULL)
+				{
+					valid = valid || nonMeshShape0;
+				}
+
+
+				if (valid)
+				{
+					result = this->callback(rb0->world->blenderWorld, rb0->meshIsland, rb1->meshIsland, rb0->blenderOb, rb1->blenderOb);
+				}
+				else
+				{
+					//just check for ghost flags and collision groups there
+					result = this->callback(NULL, NULL, NULL, rb0->blenderOb, rb1->blenderOb);
+				}
+			}
+			else
+			{
+				result = this->callback(rb0->world->blenderWorld, rb0->meshIsland, rb1->meshIsland, rb0->blenderOb, rb1->blenderOb);
+			}
+
+			collides = collides && (bool)result;
+		}
 		
 		return collides;
 	}
 };
 
-static inline void copy_v3_btvec3(float vec[3], const btVector3 &btvec)
-{
-	vec[0] = (float)btvec[0];
-	vec[1] = (float)btvec[1];
-	vec[2] = (float)btvec[2];
-}
 static inline void copy_quat_btquat(float quat[4], const btQuaternion &btquat)
 {
 	quat[0] = btquat.getW();
@@ -136,12 +369,15 @@ static inline void copy_quat_btquat(float quat[4], const btQuaternion &btquat)
 	quat[3] = btquat.getZ();
 }
 
+
 /* ********************************** */
 /* Dynamics World Methods */
 
 /* Setup ---------------------------- */
 
-rbDynamicsWorld *RB_dworld_new(const float gravity[3])
+//yuck, but need a handle for the world somewhere for collision callback...
+rbDynamicsWorld *RB_dworld_new(const float gravity[3], void* blenderWorld, int (*callback)(void *, void *, void *, void *, void *),
+							   void (*contactCallback)(rbContactPoint* cp, void *bworld))
 {
 	rbDynamicsWorld *world = new rbDynamicsWorld;
 	
@@ -153,19 +389,30 @@ rbDynamicsWorld *RB_dworld_new(const float gravity[3])
 	
 	world->pairCache = new btDbvtBroadphase();
 	
-	world->filterCallback = new rbFilterCallback();
+	world->filterCallback = new rbFilterCallback(callback);
 	world->pairCache->getOverlappingPairCache()->setOverlapFilterCallback(world->filterCallback);
 
 	/* constraint solving */
 	world->constraintSolver = new btSequentialImpulseConstraintSolver();
 
+	TickDiscreteDynamicsWorld *tworld = new TickDiscreteDynamicsWorld(world->dispatcher,
+	                                                                  world->pairCache,
+	                                                      world->constraintSolver,
+	                                                      world->collisionConfiguration,
+	                                                      contactCallback, blenderWorld);
+
 	/* world */
-	world->dynamicsWorld = new btDiscreteDynamicsWorld(world->dispatcher,
-	                                                   world->pairCache,
-	                                                   world->constraintSolver,
-	                                                   world->collisionConfiguration);
+	world->dynamicsWorld = (btDiscreteDynamicsWorld*)tworld;
+	world->blenderWorld = blenderWorld;
 
 	RB_dworld_set_gravity(world, gravity);
+
+	/*contact callback */
+/*
+	if (contactCallback)
+	{
+		world->contactCallback = new rbContactCallback(contactCallback, world->blenderWorld);
+	} */
 	
 	return world;
 }
@@ -220,10 +467,12 @@ void RB_dworld_step_simulation(rbDynamicsWorld *world, float timeStep, int maxSu
 
 /* Export -------------------------- */
 
-/* Exports entire dynamics world to Bullet's "*.bullet" binary format
- * which is similar to Blender's SDNA system...
- * < rbDynamicsWorld: dynamics world to write to file
- * < filename: assumed to be a valid filename, with .bullet extension 
+/**
+ * Exports entire dynamics world to Bullet's "*.bullet" binary format
+ * which is similar to Blender's SDNA system.
+ *
+ * \param world Dynamics world to write to file
+ * \param filename Assumed to be a valid filename, with .bullet extension
  */
 void RB_dworld_export(rbDynamicsWorld *world, const char *filename)
 {
@@ -248,19 +497,31 @@ void RB_dworld_export(rbDynamicsWorld *world, const char *filename)
 
 /* Setup ---------------------------- */
 
-void RB_dworld_add_body(rbDynamicsWorld *world, rbRigidBody *object, int col_groups)
+void RB_dworld_add_body(rbDynamicsWorld *world, rbRigidBody *object, int col_groups, void* meshIsland, void* blenderOb, int linear_index)
 {
 	btRigidBody *body = object->body;
 	object->col_groups = col_groups;
-	
+	object->meshIsland = meshIsland;
+	object->world = world;
+	object->blenderOb = blenderOb;
+	object->linear_index = linear_index;
+
+	world->pairCache->getOverlappingPairCache()->setOverlapFilterCallback(NULL);
+
 	world->dynamicsWorld->addRigidBody(body);
+
+	world->pairCache->getOverlappingPairCache()->setOverlapFilterCallback(world->filterCallback);
 }
 
 void RB_dworld_remove_body(rbDynamicsWorld *world, rbRigidBody *object)
 {
 	btRigidBody *body = object->body;
-	
+
+	world->pairCache->getOverlappingPairCache()->setOverlapFilterCallback(NULL);
+
 	world->dynamicsWorld->removeRigidBody(body);
+
+	world->pairCache->getOverlappingPairCache()->setOverlapFilterCallback(world->filterCallback);
 }
 
 /* Collision detection */
@@ -318,7 +579,7 @@ void RB_world_convex_sweep_test(
 
 /* ............ */
 
-rbRigidBody *RB_body_new(rbCollisionShape *shape, const float loc[3], const float rot[4])
+rbRigidBody *RB_body_new(rbCollisionShape *shape, const float loc[3], const float rot[4], bool (*kinematic_callback)(void *user_pointer), void* user_pointer)
 {
 	rbRigidBody *object = new rbRigidBody;
 	/* current transform */
@@ -332,7 +593,8 @@ rbRigidBody *RB_body_new(rbCollisionShape *shape, const float loc[3], const floa
 	/* make rigidbody */
 	btRigidBody::btRigidBodyConstructionInfo rbInfo(1.0f, motionState, shape->cshape);
 	
-	object->body = new btRigidBody(rbInfo);
+	object->blenderOb = user_pointer;
+	object->body = new MyRigidBody(rbInfo, kinematic_callback, object->blenderOb);
 	
 	object->body->setUserPointer(object);
 	
@@ -367,7 +629,12 @@ void RB_body_delete(rbRigidBody *object)
 
 void RB_body_set_collision_shape(rbRigidBody *object, rbCollisionShape *shape)
 {
-	btRigidBody *body = object->body;
+	btRigidBody *body;
+
+	if (!object)
+		return;
+
+	body = object->body;
 	
 	/* set new collision shape */
 	body->setCollisionShape(shape->cshape);
@@ -388,7 +655,7 @@ float RB_body_get_mass(rbRigidBody *object)
 	float value = (float)body->getInvMass();
 	
 	if (value)
-		value = 1.0 / value;
+		value = 1.0f / value;
 		
 	return value;
 }
@@ -567,6 +834,12 @@ void RB_body_deactivate(rbRigidBody *object)
 	body->setActivationState(ISLAND_SLEEPING);
 }
 
+int RB_body_get_activation_state(rbRigidBody* object)
+{
+	btRigidBody* body = object->body;
+	return body->getActivationState();
+}
+
 /* ............ */
 
 
@@ -641,6 +914,20 @@ void RB_body_apply_central_force(rbRigidBody *object, const float v_in[3])
 	btRigidBody *body = object->body;
 	
 	body->applyCentralForce(btVector3(v_in[0], v_in[1], v_in[2]));
+}
+
+void RB_body_apply_impulse(rbRigidBody* object, const float impulse[3], const float pos[3])
+{
+	btRigidBody *body = object->body;
+
+	body->applyImpulse(btVector3(impulse[0], impulse[1], impulse[2]), btVector3(pos[0], pos[1], pos[2]));
+}
+
+void RB_body_apply_force(rbRigidBody* object, const float force[3], const float pos[3])
+{
+	btRigidBody *body = object->body;
+
+	body->applyForce(btVector3(force[0], force[1], force[2]), btVector3(pos[0], pos[1], pos[2]));
 }
 
 /* ********************************** */
@@ -726,8 +1013,8 @@ rbMeshData *RB_trimesh_data_new(int num_tris, int num_verts)
 static void RB_trimesh_data_delete(rbMeshData *mesh)
 {
 	delete mesh->index_array;
-	delete mesh->vertices;
-	delete mesh->triangles;
+	delete[] mesh->vertices;
+	delete[] mesh->triangles;
 	delete mesh;
 }
  
@@ -826,6 +1113,10 @@ float RB_shape_get_margin(rbCollisionShape *shape)
 void RB_shape_set_margin(rbCollisionShape *shape, float value)
 {
 	shape->cshape->setMargin(value);
+
+	/* GIimpact shapes have to be updated to take new margin into account */
+	if (shape->cshape->getShapeType() == GIMPACT_SHAPE_PROXYTYPE)
+		((btGImpactMeshShape *)(shape->cshape))->updateBound();
 }
 
 /* ********************************** */
@@ -993,6 +1284,13 @@ void RB_constraint_set_enabled(rbConstraint *con, int enabled)
 	btTypedConstraint *constraint = reinterpret_cast<btTypedConstraint*>(con);
 	
 	constraint->setEnabled(enabled);
+}
+
+int RB_constraint_is_enabled(rbConstraint *con)
+{
+	btTypedConstraint *constraint = reinterpret_cast<btTypedConstraint*>(con);
+
+	return constraint->isEnabled();
 }
 
 void RB_constraint_set_limits_hinge(rbConstraint *con, float lower, float upper)

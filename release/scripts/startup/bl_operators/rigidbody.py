@@ -54,7 +54,7 @@ class CopyRigidbodySettings(Operator):
     @classmethod
     def poll(cls, context):
         obj = context.object
-        return (obj and obj.rigid_body)
+        return (obj and obj.rigidbody_object)
 
     def execute(self, context):
         obj_act = context.object
@@ -64,24 +64,26 @@ class CopyRigidbodySettings(Operator):
         for o in context.selected_objects:
             if o.type != 'MESH':
                 o.select = False
+            elif o.rigid_body is None:
+                # Add rigidbody to object!
+                scene.objects.active = o
+                bpy.ops.rigidbody.object_add()
+        scene.objects.active = obj_act
 
         objects = context.selected_objects
         if objects:
-            # add selected objects to active one groups and recalculate
-            bpy.ops.group.objects_add_active()
-            scene.frame_set(scene.frame_current)
-            rb_from = obj_act.rigid_body
+            rb_from = obj_act.fracture_container.rb_settings
             # copy settings
             for o in objects:
-                rb_to = o.rigid_body
-                if (o == obj_act) or (rb_to is None):
+                rb_to = o.fracture_container.rb_settings
+                if o == obj_act:
                     continue
                 for attr in self._attrs:
                     setattr(rb_to, attr, getattr(rb_from, attr))
 
         return {'FINISHED'}
 
-
+#FM TODO, either expose this to py or better to in C, faster....
 class BakeToKeyframes(Operator):
     '''Bake rigid body transformations of selected objects to keyframes'''
     bl_idname = "rigidbody.bake_to_keyframes"
@@ -110,7 +112,7 @@ class BakeToKeyframes(Operator):
     @classmethod
     def poll(cls, context):
         obj = context.object
-        return (obj and obj.rigid_body)
+        return (obj and obj.rigidbody_object)
 
     def execute(self, context):
         bake = []
@@ -120,10 +122,13 @@ class BakeToKeyframes(Operator):
         frames_step = range(self.frame_start, self.frame_end + 1, self.step)
         frames_full = range(self.frame_start, self.frame_end + 1)
 
+        constraints = []
         # filter objects selection
         for obj in context.selected_objects:
-            if not obj.rigid_body or obj.rigid_body.type != 'ACTIVE':
+            if (not obj.rigid_body or obj.rigid_body.type != 'ACTIVE' or self.has_fracture_modifier(obj, True)):
                 obj.select = False
+            if (obj.rigidbody_constraint):
+               constraints.append(obj)
 
         objects = context.selected_objects
 
@@ -143,6 +148,9 @@ class BakeToKeyframes(Operator):
                 scene.frame_set(f)
                 for j, obj in enumerate(objects):
                     mat = bake[i][j]
+                    # convert world space transform to parent space, so parented objects don't get offset after baking
+                    if (obj.parent):
+                        mat = obj.matrix_parent_inverse.inverted() * obj.parent.matrix_world.inverted() * mat
 
                     obj.location = mat.to_translation()
 
@@ -166,8 +174,25 @@ class BakeToKeyframes(Operator):
 
                 bpy.ops.anim.keyframe_insert(type='BUILTIN_KSI_LocRot', confirm_success=False)
 
-            # remove baked objects from simulation
-            bpy.ops.rigidbody.objects_remove()
+            # remove baked objects from simulation, only if no Fracture Modifier is detected (messes up bake possibly)!
+            hasFracture = False # FM_TODO
+
+            if (hasFracture == False):
+                #remove (selected) constraints first
+                for obj in constraints:
+                    obj.select = True
+
+                bpy.ops.rigidbody.constraints_remove()
+
+                for obj in constraints:
+                    obj.select = False
+                    obj.hide = True
+
+                bpy.ops.rigidbody.objects_remove()
+            else:
+                 # set to kinematic only
+                 for obj in objects:
+                    obj.rigid_body.kinematic = True
 
             # clean up keyframes
             for obj in objects:
@@ -236,7 +261,7 @@ class ConnectRigidBodies(Operator):
     @classmethod
     def poll(cls, context):
         obj = context.object
-        return (obj and obj.rigid_body)
+        return (obj and obj.rigidbody_object)
 
     def _add_constraint(self, context, object1, object2):
         if object1 == object2:
@@ -258,7 +283,7 @@ class ConnectRigidBodies(Operator):
         bpy.ops.rigidbody.constraint_add()
         con_obj = context.active_object
         con_obj.empty_draw_type = 'ARROWS'
-        con = con_obj.rigid_body_constraint
+        con = con_obj.rigidbody_constraint
         con.type = self.con_type
 
         con.object1 = object1

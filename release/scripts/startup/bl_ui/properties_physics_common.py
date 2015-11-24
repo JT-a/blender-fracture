@@ -23,7 +23,7 @@ from bpy.types import Panel
 from bpy.app.translations import contexts as i18n_contexts
 
 
-class PhysicButtonsPanel():
+class PhysicButtonsPanel:
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
     bl_context = "physics"
@@ -77,6 +77,8 @@ class PHYSICS_PT_add(PhysicButtonsPanel, Panel):
             physics_add(self, col, context.dynamic_paint, "Dynamic Paint", 'DYNAMIC_PAINT', 'MOD_DYNAMICPAINT', True)
             physics_add(self, col, context.fracture, "Fracture", 'FRACTURE', 'MOD_EXPLODE', True)
 
+        if obj.type in {'CURVE', 'SURFACE', 'FONT'}:
+            physics_add(self, col, context.fracture, "Fracture", 'FRACTURE', 'MOD_EXPLODE', True)
         col = split.column()
 
         if obj.type in {'MESH', 'LATTICE', 'CURVE'}:
@@ -86,13 +88,19 @@ class PHYSICS_PT_add(PhysicButtonsPanel, Panel):
             physics_add(self, col, context.fluid, "Fluid", 'FLUID_SIMULATION', 'MOD_FLUIDSIM', True)
             physics_add(self, col, context.smoke, "Smoke", 'SMOKE', 'MOD_SMOKE', True)
 
-            physics_add_special(self, col, obj.rigid_body, "Rigid Body",
+            physics_add_special(self, col, obj.rigidbody_object, "Rigid Body",
+                                "rigidbody.object_add",
+                                "rigidbody.object_remove",
+                                'MESH_ICOSPHERE')  # XXX: need dedicated icon
+
+        if obj.type in {'CURVE', 'SURFACE', 'FONT'}: #works with fracture modifier
+            physics_add_special(self, col, obj.rigidbody_object, "Rigid Body",
                                 "rigidbody.object_add",
                                 "rigidbody.object_remove",
                                 'MESH_ICOSPHERE')  # XXX: need dedicated icon
 
         # all types of objects can have rigid body constraint
-        physics_add_special(self, col, obj.rigid_body_constraint, "Rigid Body Constraint",
+        physics_add_special(self, col, obj.rigidbody_constraint, "Rigid Body Constraint",
                             "rigidbody.constraint_add",
                             "rigidbody.constraint_remove",
                             'CONSTRAINT')  # RB_TODO needs better icon

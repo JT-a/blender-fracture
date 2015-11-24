@@ -34,6 +34,7 @@
 #define __DNA_RIGIDBODY_TYPES_H__
 
 #include "DNA_listBase.h"
+#include "DNA_defs.h"
 
 struct Group;
 
@@ -46,6 +47,8 @@ struct EffectorWeights;
  *
  * Represents a "simulation scene" existing within the parent scene.
  */
+typedef struct RigidBodyOb RigidBodyOb;
+
 typedef struct RigidBodyWorld {
 	/* Sim World Settings ------------------------------------------------------------- */
 	struct EffectorWeights *effector_weights; /* effectors info */
@@ -60,7 +63,7 @@ typedef struct RigidBodyWorld {
 	
 	/* cache */
 	struct PointCache *pointcache;
-	struct ListBase ptcaches;
+	struct ListBase ptcaches DNA_DEPRECATED;
 	int numbodies;              /* number of objects in rigid body group */
 	
 	short steps_per_second;		/* number of simulation steps thaken per second */
@@ -71,6 +74,9 @@ typedef struct RigidBodyWorld {
 	
 	/* References to Physics Sim objects. Exist at runtime only ---------------------- */
 	void *physics_world;		/* Physics sim world (i.e. btDiscreteDynamicsWorld) */
+	RigidBodyOb **cache_index_map DNA_DEPRECATED;		/* Maps the linear RigidbodyOb index to the nested Object(Modifier) Index, at runtime*/
+	int *cache_offset_map DNA_DEPRECATED;		/* Maps the linear RigidbodyOb index to the nested Object(Modifier) cell offset, at runtime, so it does not need to be calced in cache*/
+	//char pad2[4];
 } RigidBodyWorld;
 
 /* Flags for RigidBodyWorld */
@@ -79,8 +85,14 @@ typedef enum eRigidBodyWorld_Flag {
 	RBW_FLAG_MUTED				= (1 << 0),
 	/* sim data needs to be rebuilt */
 	RBW_FLAG_NEEDS_REBUILD		= (1 << 1),
-	/* usse split impulse when stepping the simulation */
-	RBW_FLAG_USE_SPLIT_IMPULSE	= (1 << 2)
+	/* use split impulse when stepping the simulation */
+	RBW_FLAG_USE_SPLIT_IMPULSE	= (1 << 2),
+	/* Flag changes to objects (especially those with modifiers)*/
+	RBW_FLAG_OBJECT_CHANGED		= (1 << 3),
+	/* If we have rigidbody modifiers, time to refresh them if flag is set*/
+	RBW_FLAG_REFRESH_MODIFIERS	= (1 << 4),
+	/* Flag rebuild of constraints in fracture modifier objects */
+	RBW_FLAG_REBUILD_CONSTRAINTS = (1 << 5),
 } eRigidBodyWorld_Flag;
 
 /* ******************************** */
@@ -94,15 +106,18 @@ typedef enum eRigidBodyWorld_Flag {
  */
 typedef struct RigidBodyOb {
 	/* References to Physics Sim objects. Exist at runtime only */
-	void *physics_object;	/* Physics object representation (i.e. btRigidBody) */
-	void *physics_shape;	/* Collision shape used by physics sim (i.e. btCollisionShape) */
+	void *physics_object DNA_DEPRECATED;	/* Physics object representation (i.e. btRigidBody) */
+	void *physics_shape DNA_DEPRECATED;	/* Collision shape used by physics sim (i.e. btCollisionShape) */
+
+	struct FractureContainer *fracture_objects;
 	
 	/* General Settings for this RigidBodyOb */
 	short type;				/* (eRigidBodyOb_Type) role of RigidBody in sim  */
-	short shape;			/* (eRigidBody_Shape) collision shape to use */ 
+	short shape;			/* (eRigidBody_Shape) collision shape to use */
 	
 	int flag;				/* (eRigidBodyOb_Flag) */
-	int col_groups;			/* Collision groups that determines wich rigid bodies can collide with each other */
+	int col_groups; 			/* Collision groups that determines wich rigid bodies can collide with each other */
+	int meshisland_index DNA_DEPRECATED;	/* determines "offset" inside an objects meshisland list, -1 for regular rigidbodies */
 	short mesh_source;		/* (eRigidBody_MeshSource) mesh source for mesh based collision shapes */
 	short pad;
 	
@@ -112,19 +127,39 @@ typedef struct RigidBodyOb {
 	float friction;			/* resistance of object to movement */
 	float restitution;		/* how 'bouncy' object is when it collides */
 	
-	float margin;			/* tolerance for detecting collisions */ 
+	float margin;			/* tolerance for detecting collisions */
 	
-	float lin_damping;		/* damping for linear velocities */
-	float ang_damping;		/* damping for angular velocities */
+	float lin_damping ;		/* damping for linear velocities */
+	float ang_damping ;		/* damping for angular velocities */
 	
 	float lin_sleep_thresh;	/* deactivation threshold for linear velocities */
 	float ang_sleep_thresh;	/* deactivation threshold for angular velocities */
 	
-	float orn[4];			/* rigid body orientation */
-	float pos[3];			/* rigid body position */
+	float orn[4] DNA_DEPRECATED;			/* rigid body orientation */
+	float pos[3] DNA_DEPRECATED;			/* rigid body position */
+	float lin_vel[3] DNA_DEPRECATED;		/* rigid body linear velocity, important for dynamic fracture*/
+	float ang_vel[3 ]DNA_DEPRECATED;		/* rigid body angular velocity, important for dynamic fracture*/
 	float pad1;
 } RigidBodyOb;
 
+typedef struct RigidBodyShardOb {
+	/* References to Physics Sim objects. Exist at runtime only */
+	void *physics_object;	/* Physics object representation (i.e. btRigidBody) */
+	void *physics_shape;	/* Collision shape used by physics sim (i.e. btCollisionShape) */
+
+	/* Physics Parameters */
+	float mass;				/* how much object 'weighs' (i.e. absolute 'amount of stuff' it holds) */
+	float orn[4];			/* rigid body orientation */
+	float pos[3];			/* rigid body position */
+	float lin_vel[3];		/* rigid body linear velocity, important for dynamic fracture*/
+	float ang_vel[3];		/* rigid body angular velocity, important for dynamic fracture*/
+
+	/* General Settings for this RigidBodyOb */
+	int flag;				/* (eRigidBodyOb_Flag) */
+	short type;				/* (eRigidBodyOb_Type) role of RigidBodyShard in sim  */
+
+	char pad[2];
+} RigidBodyShardOb;
 
 /* Participation types for RigidBodyOb */
 typedef enum eRigidBodyOb_Type {
@@ -151,7 +186,15 @@ typedef enum eRigidBodyOb_Flag {
 	/* collision margin is not embedded (only used by convex hull shapes for now) */
 	RBO_FLAG_USE_MARGIN			= (1 << 6),
 	/* collision shape deforms during simulation (only for passive triangle mesh shapes) */
-	RBO_FLAG_USE_DEFORM			= (1 << 7)
+	RBO_FLAG_USE_DEFORM			= (1 << 7),
+	/* rebuild object after collision, (change kinematic state) */
+	RBO_FLAG_KINEMATIC_REBUILD	= (1 << 8),
+	/* enable / disable kinematic state change after collision */
+	RBO_FLAG_USE_KINEMATIC_DEACTIVATION = (1 << 9),
+	/* ghost flag, do not collide with object (but can activate although) */
+	RBO_FLAG_IS_GHOST = (1 << 10),
+	/* trigger flag, trigger kinematic state change on other objects */
+	RBO_FLAG_IS_TRIGGER = (1 << 11),
 } eRigidBodyOb_Flag;
 
 /* RigidBody Collision Shape */
@@ -196,6 +239,8 @@ typedef struct RigidBodyCon {
 	struct Object *ob1;			/* First object influenced by the constraint */
 	struct Object *ob2;			/* Second object influenced by the constraint */
 
+	struct ConstraintContainer *fracture_constraints;
+
 	/* General Settings for this RigidBodyCon */
 	short type;					/* (eRigidBodyCon_Type) role of RigidBody in sim  */
 	short num_solver_iterations;/* number of constraint solver iterations made per simulation step */
@@ -238,8 +283,33 @@ typedef struct RigidBodyCon {
 	float motor_ang_max_impulse;		/* maximum force used to reach angular target velocity */
 
 	/* References to Physics Sim object. Exist at runtime only */
-	void *physics_constraint;	/* Physics object representation (i.e. btTypedConstraint) */
+	void *physics_constraint DNA_DEPRECATED;	/* Physics object representation (i.e. btTypedConstraint) */
 } RigidBodyCon;
+
+/* RigidBodyConstraint (rbc)
+ *
+ * Represents an constraint connecting two shard rigid bodies.
+ */
+typedef struct RigidBodyShardCon {
+
+	struct RigidBodyShardCon *next, *prev;
+	struct MeshIsland *mi1;			/* First meshisland influenced by the constraint */
+	struct MeshIsland *mi2;			/* Second meshisland influenced by the constraint */
+
+	/* General Settings for this RigidBodyCon */
+	short type;					/* (eRigidBodyCon_Type) role of RigidBody in sim  */
+	short num_solver_iterations;/* number of constraint solver iterations made per simulation step */
+
+	int flag;					/* (eRigidBodyCon_Flag) */
+
+	float breaking_threshold;	/* breaking impulse threshold */
+	float start_angle;			//needed for breaking by angle and dist
+	float start_dist;
+	float pad;
+
+	/* References to Physics Sim object. Exist at runtime only */
+	void *physics_constraint;	/* Physics object representation (i.e. btTypedConstraint) */
+} RigidBodyShardCon;
 
 
 /* Participation types for RigidBodyOb */
@@ -295,7 +365,13 @@ typedef enum eRigidBodyCon_Flag {
 	RBC_FLAG_USE_SPRING_Z				= (1 << 13),
 	/* motors */
 	RBC_FLAG_USE_MOTOR_LIN				= (1 << 14),
-	RBC_FLAG_USE_MOTOR_ANG				= (1 << 15)
+	RBC_FLAG_USE_MOTOR_ANG				= (1 << 15),
+	/* prevent multiple removal and crash with kinematic deactivation */
+	RBC_FLAG_USE_KINEMATIC_DEACTIVATION = (1 << 16),
+
+	/* sigh, we dont have a world or scene reference at hand when we need to delete ourselves */
+	/* so flag removal and postpone deletion */
+//	RBC_FLAG_PURGE_ON_VALIDATE			= (1 << 17),
 } eRigidBodyCon_Flag;
 
 /* ******************************** */
